@@ -59,23 +59,40 @@ Optional flags:
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope Process
 cd C:\Temp\StoreExplorer-Installer
-.\Install-StoreExplorer.ps1
+.\Install-StoreExplorer.ps1 -Hostname sdpauto1
 ```
 
-The script creates the app pool, IIS applications, copies files, and sets permissions.
+Pass the actual hostname of the machine where IIS is running.  
+The script will configure the app for `https://sdpauto1/storeExplorer` automatically.
 
-### Custom parameters
+### Parameters
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `-Hostname` | **Yes** | — | IIS server hostname (e.g. `sdpauto1`, `myserver.corp.com`) |
+| `-Scheme` | No | `https` | URL scheme (`https` or `http`) |
+| `-SiteName` | No | same as `-Hostname` | IIS site name if it differs from the hostname |
+| `-WebRoot` | No | `C:\inetpub\wwwroot\<Hostname>` | Physical root of the IIS website |
+| `-AppPoolName` | No | `StoreExplorerApiPool` | Name of the new API app pool |
+
+### Examples
 
 ```powershell
-# Different site name or web root
-.\Install-StoreExplorer.ps1 -SiteName "Default Web Site" -WebRoot "C:\inetpub\wwwroot"
+# Typical install
+.\Install-StoreExplorer.ps1 -Hostname sdpauto1
+
+# HTTP-only machine
+.\Install-StoreExplorer.ps1 -Hostname myserver -Scheme http
+
+# IIS site name differs from hostname, or default website
+.\Install-StoreExplorer.ps1 -Hostname myserver -SiteName "Default Web Site" -WebRoot "C:\inetpub\wwwroot"
 ```
 
 ---
 
 ## Configuration
 
-After installation, review `C:\inetpub\wwwroot\sdpauto1\storeExplorer-api\appsettings.json`.
+After installation, review `C:\inetpub\wwwroot\<Hostname>\storeExplorer-api\appsettings.json`.
 Key settings:
 
 | Setting | Default | Notes |

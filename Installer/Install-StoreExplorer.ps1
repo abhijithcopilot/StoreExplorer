@@ -1,26 +1,41 @@
 <#
 .SYNOPSIS
-    Installs StoreExplorer into an existing IIS website (https://sdpauto1).
+    Installs StoreExplorer into an existing IIS website on any host.
 
 .DESCRIPTION
     This script:
+      - Accepts a -Hostname parameter so the installer is environment-agnostic.
+      - Replaces the INSTALL_HOSTNAME placeholder baked into the frontend JS bundle
+        and API appsettings.json with the supplied hostname.
       - Creates the IIS Application Pool "StoreExplorerApiPool" (No Managed Code).
       - Creates the IIS application "storeExplorer"     under the existing website for the frontend.
-      - Creates the IIS application "storeExplorer-api" under the existing website for the .NET API.
+      - Creates the IIS application "storeExplorer-api" under the existing website for the API.
       - Copies the built frontend and API files to the target directories.
       - Sets required NTFS permissions so IIS can read and write.
-      - Optionally restarts the IIS site.
+      - Recycles the application pool.
 
     Run this script as Administrator on the target IIS machine after extracting
     StoreExplorer-Installer.zip.
 
+.PARAMETER Hostname
+    The DNS hostname (or IP) of the IIS server, WITHOUT scheme or trailing slash.
+    This value is used to:
+      - Derive the IIS site name (must match an existing site)  
+      - Derive the web root path (C:\inetpub\wwwroot\<Hostname>)
+      - Replace the INSTALL_HOSTNAME placeholder in the frontend JS bundle
+      - Set AllowedOrigin in the API appsettings.json
+    Example: sdpauto1  → app will be at https://sdpauto1/storeExplorer
+
+.PARAMETER Scheme
+    HTTP scheme for the site URL.  Default: "https"
+
 .PARAMETER SiteName
-    Name of the existing IIS website to add the applications to.
-    Default: "sdpauto1"
+    Override the IIS site name if it differs from Hostname.
+    Default: same as Hostname.
 
 .PARAMETER WebRoot
-    Root path of the IIS website on disk.
-    Default: C:\inetpub\wwwroot\sdpauto1
+    Override the physical root path of the IIS website.
+    Default: C:\inetpub\wwwroot\<Hostname>
 
 .PARAMETER AppPoolName
     Name for the new IIS Application Pool for the API.
@@ -31,23 +46,36 @@
     Default: "" (correct for ASP.NET Core)
 
 .EXAMPLE
-    # Basic install with defaults
-    .\Install-StoreExplorer.ps1
+    # Install on the current machine - hostname is sdpauto1
+    .\Install-StoreExplorer.ps1 -Hostname sdpauto1
 
-    # Custom site name / webroot
-    .\Install-StoreExplorer.ps1 -SiteName "Default Web Site" -WebRoot "C:\inetpub\wwwroot"
+    # Install with HTTP instead of HTTPS
+    .\Install-StoreExplorer.ps1 -Hostname myserver -Scheme http
+
+    # Override the IIS site name and web root explicitly
+    .\Install-StoreExplorer.ps1 -Hostname myserver -SiteName "Default Web Site" -WebRoot "C:\inetpub\wwwroot"
 #>
 
 [CmdletBinding()]
 param(
-    [string]$SiteName    = "sdpauto1",
-    [string]$WebRoot     = "C:\inetpub\wwwroot\sdpauto1",
-    [string]$AppPoolName = "StoreExplorerApiPool",
+    [Parameter(Mandatory = $true, HelpMessage = "Hostname of the IIS server, e.g. sdpauto1")]
+    [string]$Hostname,
+
+    [string]$Scheme        = "https",
+    [string]$SiteName      = "",           # derived from Hostname if not supplied
+    [string]$WebRoot       = "",           # derived from Hostname if not supplied
+    [string]$AppPoolName   = "StoreExplorerApiPool",
     [string]$DotNetVersion = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# Derive defaults from Hostname
+if ([string]::IsNullOrWhiteSpace($SiteName)) { $SiteName = $Hostname }
+if ([string]::IsNullOrWhiteSpace($WebRoot))  { $WebRoot  = "C:\inetpub\wwwroot\$Hostname" }
+
+$siteOrigin = "${Scheme}://${Hostname}"
 
 # ---------------------------------------------------------------------------
 # Must run as administrator
@@ -68,6 +96,20 @@ function Write-Step([string]$msg) {
 function Assert-Module([string]$name) {
     if (-not (Get-Module -ListAvailable -Name $name)) {
         Write-Error "PowerShell module '$name' not found. Ensure IIS Management Tools are installed."
+    }
+}
+
+# Replace all occurrences of INSTALL_HOSTNAME with $Hostname in every text file
+# under $dir that matches $filter.
+function Replace-Placeholder([string]$dir, [string]$filter, [string]$newValue) {
+    $files = Get-ChildItem -Path $dir -Filter $filter -Recurse -File -ErrorAction SilentlyContinue
+    foreach ($file in $files) {
+        $content = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+        if ($content -match 'INSTALL_HOSTNAME') {
+            $updated = $content -replace 'INSTALL_HOSTNAME', $newValue
+            Set-Content -LiteralPath $file.FullName -Value $updated -Encoding UTF8 -NoNewline
+            Write-Host "  Patched hostname in: $($file.Name)"
+        }
     }
 }
 
@@ -93,8 +135,7 @@ Assert-Module "WebAdministration"
 Import-Module WebAdministration
 
 # Check ASP.NET Core Hosting Bundle
-$hostingBundle = Get-Command "dotnet" -ErrorAction SilentlyContinue
-if (-not $hostingBundle) {
+if (-not (Get-Command "dotnet" -ErrorAction SilentlyContinue)) {
     Write-Warning @"
 'dotnet' not found in PATH. 
 The ASP.NET Core Runtime / Hosting Bundle must be installed on this machine.
@@ -103,7 +144,6 @@ Download from: https://dotnet.microsoft.com/download/dotnet/8.0
 }
 
 # Check URL Rewrite Module (needed for SPA fallback)
-$rewriteModule = Get-Item "IIS:\Sites" -ErrorAction SilentlyContinue
 $rewriteDll = "$env:SystemRoot\System32\inetsrv\rewrite.dll"
 if (-not (Test-Path $rewriteDll)) {
     Write-Warning @"
@@ -115,10 +155,12 @@ Download from: https://www.iis.net/downloads/microsoft/url-rewrite
 
 # Verify the target IIS site exists
 if (-not (Get-WebSite -Name $SiteName -ErrorAction SilentlyContinue)) {
-    Write-Error "IIS site '$SiteName' not found. Please create it first or specify -SiteName."
+    Write-Error "IIS site '$SiteName' not found. Please create it first or use -SiteName to specify a different name."
 }
 
-Write-Host "  Target IIS site : $SiteName" -ForegroundColor Green
+Write-Host "  Hostname        : $Hostname"
+Write-Host "  Site origin     : $siteOrigin"
+Write-Host "  Target IIS site : $SiteName"
 Write-Host "  Web root        : $WebRoot"
 
 # ---------------------------------------------------------------------------
@@ -147,6 +189,19 @@ Copy-Item "$frontendSrc\*" $frontendDest -Recurse -Force
 
 Write-Step "Copying API files → $apiDest"
 Copy-Item "$apiSrc\*" $apiDest -Recurse -Force
+
+# ---------------------------------------------------------------------------
+# Replace INSTALL_HOSTNAME placeholder
+# ---------------------------------------------------------------------------
+Write-Step "Applying hostname '$Hostname' to configuration"
+
+# Frontend: Vite bakes VITE_WITSMLEXPLORER_API_URL into the JS bundle at build time.
+# Replace the placeholder in all .js files in the assets folder.
+Replace-Placeholder $frontendDest "*.js"   $Hostname
+Replace-Placeholder $frontendDest "*.json" $Hostname
+
+# API: appsettings.json contains AllowedOrigin with the placeholder.
+Replace-Placeholder $apiDest "*.json" $Hostname
 
 # ---------------------------------------------------------------------------
 # Configure IIS Application Pool for the API
@@ -220,17 +275,7 @@ Grant-Permission $frontendDest $iisUsrs        "ReadAndExecute"
 Grant-Permission $apiDest      $appPoolAccount "Modify"
 
 # ---------------------------------------------------------------------------
-# Write a minimal appsettings override reminder
-# ---------------------------------------------------------------------------
-$apiSettingsPath = Join-Path $apiDest "appsettings.json"
-Write-Host @"
-
-  API settings file: $apiSettingsPath
-  Review AllowedOrigin, OAuth2Enabled, and connection strings before first use.
-"@ -ForegroundColor Yellow
-
-# ---------------------------------------------------------------------------
-# Recycle app pool / restart site
+# Recycle app pool
 # ---------------------------------------------------------------------------
 Write-Step "Restarting Application Pool '$AppPoolName'"
 Restart-WebAppPool -Name $AppPoolName
@@ -239,13 +284,14 @@ Write-Host "  App pool recycled."
 Write-Step "Installation complete"
 Write-Host @"
 
-  Frontend : https://sdpauto1/storeExplorer
-  API      : https://sdpauto1/storeExplorer-api
+  Frontend : $siteOrigin/storeExplorer
+  API      : $siteOrigin/storeExplorer-api
 
 Troubleshooting
 ---------------
 - If pages return 404, verify the IIS URL Rewrite module is installed.
 - If the API returns 502, check the ASP.NET Core Hosting Bundle version (requires .NET 8).
-- Logs are written to: $apiLogsDir
-- To tail logs:  Get-Content "$apiLogsDir\api-*.log" -Wait -Tail 50
+- API settings : $apiDest\appsettings.json
+- Logs         : $apiLogsDir
+- Tail logs    : Get-Content "$apiLogsDir\api-*.log" -Wait -Tail 50
 "@ -ForegroundColor Green
