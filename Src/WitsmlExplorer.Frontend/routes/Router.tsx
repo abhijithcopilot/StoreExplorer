@@ -64,6 +64,10 @@ const queryClient = new QueryClient({
 
 const createRouter = isDesktopApp() ? createHashRouter : createBrowserRouter;
 
+const routerOptions = isDesktopApp()
+  ? undefined
+  : { basename: import.meta.env.BASE_URL };
+
 const router = createRouter([
   {
     path: "/",
@@ -182,7 +186,7 @@ const router = createRouter([
       }
     ]
   }
-]);
+], routerOptions);
 
 export default function Router() {
   return (

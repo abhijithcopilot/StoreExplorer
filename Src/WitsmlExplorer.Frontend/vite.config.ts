@@ -5,8 +5,12 @@ import { defineConfig } from "vite";
 import tsconfigPaths from "vite-tsconfig-paths";
 
 // https://vitejs.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react(), tsconfigPaths()],
+
+  // Sub-path when hosted in IIS under an existing website (e.g. /storeExplorer/).
+  // Falls back to "/" in development so the dev server still works.
+  base: mode === "production" ? "/storeExplorer/" : "/",
 
   // port for preview
   preview: {
@@ -17,4 +21,4 @@ export default defineConfig({
   server: {
     port: 3000
   }
-});
+}));
